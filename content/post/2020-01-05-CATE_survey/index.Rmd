@@ -1,0 +1,791 @@
+---
+title: "CATE Examples and Simulations"
+author: "Dor Leventer"
+date: "25/12/2021"
+output:
+  html_document:
+    theme: readable
+    toc: yes
+    toc_depth: 4
+    toc_float: yes
+  pdf_document:
+    extra_dependencies:
+    - amssymb
+    - amsmath
+    - mathtools
+    - pdftools
+bibliography: biblio.bib  
+---
+
+------------------------------------------------------------------------
+
+# Setup
+
+## General Setup
+
+```{r setup, message = F, warning = F, results = 'hide'}
+# markdown code option
+knitr::opts_chunk$set(echo = T)
+# clear enviorment
+rm(list=ls(all=TRUE))
+gc()
+set.seed(1)
+options(scipen=999)
+
+# libraries
+# library(devtools) 
+# devtools::install_github("xnie/rlearner")
+vec.pac= c("gbm","glmnet","rpart","randomForest",
+           "nnet","caret","tidyverse","simstudy",
+           "rlearner","grf")
+lapply(vec.pac, require, character.only = TRUE)
+
+```
+
+
+***
+
+# Introduction
+
+This post is a summary of CATE estimation procedures using machine learning methods. The purpose is to survey contemporary methods, and provide very basic functions so that the reader (me and other people interested in this subject) understand the difference between the various algorithms. And, perhaps use these functions as a starting point in estimation procedures in empirical projects. Comments (errors, corrections, and so on) are more than welcome, this is mainly for me to learn on the subject. 
+
+***
+
+# Framework - Potential Outcomes
+
+We consider the case of a binary treatment mechanism $W\in\{0,1\}$. We follow convention and denote the outcome $Y$ of individual $i$ if she were treated $W=1$ as $Y^1$. Similarly we denote the potential outcome if she were not treated $W=0$ as $Y^0$. The average treatment effect (ATE) is defined as a constant for the population: $$ATE=\tau=E[Y^1-Y^0]$$ The ATE is identifiable under the following set of assumptions
+
+1.  CIA: $Y^a\perp W|Z$, which we read as: the potential outcomes are not determined by the treatment if we condition on a set of variables, denoted $Z$.
+2.  SUTVA: $Y^w=Y|W=w$, which we read as: the potential outcomes is equal the observed outcome if we condition on actually getting the treatment value of the potential outcome
+3.  Positivity: $Pr(W=1|Z)\in(0,1)$, which we read as: for every combination of $Z$ there is some positive probability of getting treated or un-treated.
+
+The ATE is defined as a constant in the population. The conditional average treatment effect (CATE) is defined as a function of some set of variables, denoted $X$: $$CATE=\tau(x)=E[Y^1-Y^0|X=x]$$
+
+Below we go over several machine learning (ML) methodologies to estimate $\hat{\tau}(x)$.
+
+***
+
+# Simplest Learners
+
+The term meta-learner is a methodolgy using ML to estimate the CATE. We begin with the simplest two: S- and T-learners. 
+
+***
+
+## S-Learner
+
+The S-learner (S from single) fits a ML model to the data where $Y$ is the outcome variable and $(W,Z)$ is the matrix of explaining variables, i.e. $(Y~W,Z)$. Using this model the S-learner estimates conditional means for the treated and the un-treated by predicting on data with all treated and all un-treated. That is:
+
+```{r s-learner algo., eval = FALSE, highlight= F}
+S-Learner: Y,W,X,
+1. Fit (Y ~ X,W)
+2. Predict \hat{\mu}^1(X) = E[Y|W=1,X], i.e. setting W=1
+3. Predict \hat{\mu}^0(X) = E[Y|W=0,X], i.e. setting W=0
+4. Calculate \hat{tau}(X) = \hat{\mu}^1(X) - \hat{\mu}^0(X)
+```
+
+A generic function for a S-learner may look like:
+
+```{r S-learner, function}
+CATE_S_Learner <- function(Y,W,X,
+                           ML_model = "gbm",
+                           k_folds = 5, ml_grid = NULL) {
+  
+  train <- data.frame(Y = Y, W = W, X)
+  
+  model <- caret::train(
+    Y ~ .,
+    data = train,
+    method = ML_model,
+    trControl = caret::trainControl(method = "cv", number = k_folds),
+    tuneGrid = ml_grid
+  )
+  
+  test.0 <- data.frame(W = W, X) %>% mutate(W = 0)
+  test.1 <- data.frame(W = W, X) %>% mutate(W = 1)
+  mu.0 = stats::predict(model, newdata = test.0)
+  mu.1 = stats::predict(model, newdata = test.1)
+  
+  tau = mu.1 - mu.0
+  
+  CATE_S <- list("fit.mu" = model,
+                 "train.dt" = train,
+                 "mu.0.hat" = mu.0, 
+                 "mu.1.hat" = mu.1, 
+                 "tau.hat" = tau)
+  
+  class(CATE_S) <- "S_learner"
+  
+  return(CATE_S)
+}
+```
+
+
+
+
+
+***
+
+## T-Learner
+
+The T-learner (T from two) fits a ML model twice: once to the partition of the data of the treated, and second to the partition of the data of the un-treated. Then we fit each model to the data (this time not setting $W$), predict means, and estimating the CATE.
+
+```{r t-learner algo., eval = FALSE, highlight= F}
+T-Learner: Y,W,X
+1. Fit (Y ~ X), only using W=1
+2. Fit (Y ~ X), only using W=0
+3. Predict \hat{\mu}^1(X) = E[Y|X], using the fit on W=1
+4. Predict \hat{\mu}^0(X) = E[Y|X], using the fit on W=0
+5. Calculate \hat{tau}(X) = \hat{\mu}^1(X) - \hat{\mu}^0(X)
+```
+
+
+
+A generic function for a T-learner may look like:
+
+```{r T-learner, function}
+CATE_T_Learner <- function(Y,W,X,
+                           ML_model = "gbm",
+                           k_folds = 5, ml_grid = NULL) {
+  
+  train.0 <- data.frame(Y = Y, W = W, X) %>% filter(W == 0) %>% select(-W)
+  train.1 <- data.frame(Y = Y, W = W, X) %>% filter(W == 1) %>% select(-W)
+  
+  model.0 <- caret::train(
+    Y ~ .,
+    data = train.0,
+    method = ML_model,
+    trControl = caret::trainControl(method = "cv", number = k_folds),
+    tuneGrid = ml_grid
+  )
+  
+  model.1 <- caret::train(
+    Y ~ .,
+    data = train.1,
+    method = ML_model,
+    trControl = caret::trainControl(method = "cv", number = k_folds),
+    tuneGrid = ml_grid
+  )
+  
+  test <- data.frame(X)
+  mu.0 = stats::predict(model.0, newdata = test)
+  mu.1 = stats::predict(model.1, newdata = test)
+  
+  tau = mu.1 - mu.0
+  
+  CATE_T <- list("fit.mu.0" = model.0,
+                 "fit.mu.1" = model.1,
+                 "train.dt" = train,
+                 "mu.0.hat" = mu.0, 
+                 "mu.1.hat" = mu.1, 
+                 "tau.hat" = tau)
+  
+  class(CATE_T) <- "T_learner"
+  
+  return(CATE_T)
+}
+```
+
+
+# More Sophisticated Learners
+
+## DB-Learner
+
+The DB-learner [@fan2020estimation] (Double-Robust) takes its name from its property, that if either the model of the conditional mean of the outcome or the model of the propensity score is correct then it is a consistent estimate of the CATE. The estimator incorporates an estimate of $\mu^w(x) = E[Y|X=x,W=w]$ with the propensity score $e(x)=Pr(W=1|X=x)$, as follows: $$\tau(x)_{DB} = \mu^1(x)  + \frac{W\times(Y-\mu^1(x))}{e(x)} - \mu^0(x) - \frac{(1-W)\times(Y-\mu^0(x))}{1-e(x)}$$
+
+```{r DB-learner algo., eval = FALSE, highlight= F}
+DB-Learner: Y,W,X,e
+1. Predict \hat{\mu}^1(X) and \hat{\mu}^0(X) using S- or T-learner
+2. Calculate \hat\{tau}(X) = \hat{\mu}^1(X) + e(x)^(-1)*W*(Y - \hat{\mu}^1(X)) - \hat{\mu}^0(X) - (1-e(x))^(-1)*(1-W)*(Y - \hat{\mu}^0(X))
+```
+
+
+
+A generic function for a DB-learner may look like:
+
+```{r DB-learner, function}
+CATE_DB_Learner <- function(Y,W,X,e,
+                           ML_model = "gbm",
+                           k_folds = 5, ml_grid = NULL) {
+  
+  # begin with T-learner for mu.0 and mu.1
+  T.learner = CATE_T_Learner(Y=Y, W=W, X=X, 
+                             ML_model = ML_model, k_folds = k_folds, ml_grid = ml_grid)
+  mu.0 = T.learner$mu.0.hat
+  mu.1 = T.learner$mu.1.hat
+  
+  # calculate CATE
+  tau = mu.1 + (e^(-1))*W*(Y - mu.1) - 
+    (mu.0 + ((1-e^(-1))*(1-W)*(Y - mu.0)))
+  
+  CATE_DB <- list("fit.mu.0" = T.learner$T.fit.0,
+                  "fit.mu.1" = T.learner$T.fit.1,
+                  "train.dt" = data.frame(Y=Y,W=W,X),
+                  "mu.0.hat" = mu.0, 
+                  "mu.1.hat" = mu.1, 
+                  "e" = e,
+                  "tau.hat" = tau)
+  
+  class(CATE_DB) <- "DB_learner"
+  
+  return(CATE_DB)
+}
+```
+
+
+## X-Learner
+
+The $X-Learner$ [@kunzel2019metalearners] begins with estimating $E[Y^a|X]$ using ML models as in the T-learner above. Then, the learner imputes an individual treatment effect (ITE) $D_i = W(Y - \mu^0(x_i)) + (1-W)(\mu^1(x_i)-Y)$ . Finally, it fits a second set of ML models to $D$ to estimate $\tau_0$ and $\tau_1$, i.e. the CATE among the un-treated and the treated. The final estimate for the CATE is a weighted average of the two: $$\tau(x)=\tau_1(x)\times g(x) + \tau_0(x)\times(1-g(x))$$ The authors recommend using the propensity score $e(x)=Pr(W=1|X=x)$.
+
+```{r X-learner algo., eval = FALSE, highlight= F}
+X-Learner: Y,W,X,g
+1. Predict \hat{\mu}^1(X) and \hat{\mu}^0(X) using S- or T-learner
+2. Impute D = Y^1 - \hat{\mu}^0(X_i), if W=1
+3. Impute D = \hat{\mu}^1(X_i) - Y^0, if W=0 
+4. Fit (D ~ X,W) using S- or T-learner
+5. Predict \hat{\tau}^w(X) = E[D|X,W] using the fit on D
+6. Calculate \hat{tau}(X) = g(x)\hat{\tau}^1(X) - (1-g(x))\hat{\tau}^0(X)
+```
+where $g(x)$ is some weighting function, e.g. $g(x)=e(x)$, $\hat{\tau}^1$ is the CATE estimate for the treatment and $\hat{\tau}^0$ for the un-treated.
+
+
+
+A generic function for a X-learner may look like:
+
+```{r X-learner, function}
+CATE_X_Learner <- function(Y,W,X,g,
+                           ML_model = "gbm",
+                           k_folds = 5, ml_grid = NULL) {
+  
+  # begin with T-learner for mu.0 and mu.1
+  T.learner.1 = CATE_T_Learner(Y=Y, W=W, X=X,
+                               ML_model = ML_model, k_folds = k_folds, ml_grid = ml_grid)
+  mu.0 = T.learner.1$mu.0.hat
+  mu.1 = T.learner.1$mu.1.hat
+  
+  # impute individual treatment effects
+  D = W*(Y - mu.0) + (1-W)*(mu.1 - Y)
+  
+  # fit a T-learner with D as outcome
+  T.learner.2 = CATE_T_Learner(Y=D, W=W, X=X,
+                               ML_model = ML_model, k_folds = k_folds, ml_grid = ml_grid)
+  
+  # use weighted average of predicted values of D as final CATE estimate
+  tau.0 = T.learner.2$mu.0.hat
+  tau.1 = T.learner.2$mu.1.hat
+  tau = g*tau.1 + (1-g)*tau.0
+  
+  CATE_X <- list("fit.mu.0" = T.learner.1$T.fit.0,
+                 "fit.mu.1" = T.learner.1$T.fit.1,
+                 "train.mu" = data.frame(Y=Y,W=W,X),
+                 "fit.tau.0" = T.learner.2$T.fit.0,
+                 "fit.tau.1" = T.learner.2$T.fit.1,
+                 "train.tau" = data.frame(D=D,W=W,X),
+                 "tau.0.hat" = tau.0, 
+                 "tau.1.hat" = tau.1, 
+                 "g" = g,
+                 "tau.hat" = tau)
+  
+  class(CATE_X) <- "X_learner"
+  
+  return(CATE_X)
+}
+```
+
+***
+
+# Residualizing Learners
+
+## U-Learner
+
+Featured in [@kunzel2019metalearners,@nie2021quasi], this learner uses the residuals in estimation of $E[Y|X]$ and $E[e|X]$ to estimate the CATE. It is useful in understanding the R-learner, discussed below. Define as $\mu_w(x):=E[Y^w|X=x]$ the conditional potential outcome expectation, and we can write the equation for the outcome as 
+$$ Y_i = \mu_0(x_i) + W_i\times \tau(x_i) + u_i $$
+
+Next, define the conditional outcome expectation $\mu(x):=E[Y|X=x]$ which given a propensity score $e$ is equal to 
+$$E[Y|X=x_i] = \mu_0(x_i) + e(x_i)\times \tau(x_i)$$
+
+Lastly, we get that 
+$$ Y_i - \mu(x_i) = W_i\times \tau(x_i) + u_i - e(x_i)\times \tau(x_i) = [W_i - e(x_i)]\tau(x_i) + u_i $$
+
+Taking expectations, and using the assumption of $Y^0,Y^1\perp W|X$,
+
+$$ \tau(x_i) = \frac{E[Y_i - \mu(x_i)|X]}{E[W_i - e(x_i)|X]}$$
+
+The U-learner uses the above formulation, and estimates $\tau(X)$ by fitting ML models for $\mu(X)$ and $e(X)$.
+
+
+```{r U-learner algo., eval = FALSE, highlight= F}
+U-Learner: Y,W,X
+1. Fit (Y ~ X) and predict \hat{\mu}(X) 
+2. Fit (W ~ X) and predict \hat{e}(X)
+3. Residualize u_y(X) = Y - \hat{\mu}(X) and u_e(X) = W - \hat{e}(X)
+4. Calculate psuedo-outcome U(X) = u_y(X) / u_e(X)
+5. Fit (U ~ X) and predict \hat{tau}(X)
+```
+
+
+A generic function for a U-learner may look like:
+
+```{r U-learner, function}
+CATE_U_Learner <- function(Y,W,X,
+                           ML_model = "gbm",
+                           k_folds = 5, ml_grid = NULL) {
+  
+  test <- data.frame(X)
+  
+  # fit a model for (Y~X)
+  train.Y <- data.frame(Y = Y, X)
+  
+  model.Y <- caret::train(
+    Y ~ .,
+    data = train.Y,
+    method = ML_model,
+    trControl = caret::trainControl(method = "cv", number = k_folds),
+    tuneGrid = ml_grid
+  )
+  
+  
+  mu <- stats::predict(model.Y, newdata = test)
+  
+  # fit a model for (W~X)
+  train.W <- data.frame(W = W, X)
+  
+  model.W <- caret::train(
+    W ~ .,
+    data = train.W,
+    method = ML_model,
+    trControl = caret::trainControl(method = "cv", number = k_folds),
+    tuneGrid = ml_grid
+  )
+  
+  e <- stats::predict(model.W, newdata = test)
+  
+  # residualize and fit psuedo-outcome
+  U = (Y - mu) / (W - e)
+  train.U <- data.frame(U = U, X)
+  
+  model.U <- caret::train(
+    U ~ .,
+    data = train.U,
+    method = ML_model,
+    trControl = caret::trainControl(method = "cv", number = k_folds),
+    tuneGrid = ml_grid
+  )
+
+  tau <- stats::predict(model.U, newdata = test)
+  
+  CATE_U <- list("fit.mu" = model.Y,
+                 "train.Y" = train.Y,
+                 "fit.e" = model.W,
+                 "train.W" = train.W,
+                 "fit.U" = model.U,
+                 "train.U" = train.U,
+                 "mu.hat" = mu, 
+                 "e.hat" = e, 
+                 "U.hat" = U,
+                 "tau.hat" = tau)
+  
+  class(CATE_U) <- "U_learner"
+  
+  return(CATE_U)
+}
+```
+
+***
+
+## R-Learner
+
+The R-learner [@nie2021quasi] (from Residualized) takes its name from regressing residuals of the outcome on the residuals of the treatment. Differently from the U-learner, the R-learner does this via a loss-function approach. Given the above formulation in the U-learner we get that 
+
+$$ u_i = Y_i - \mu(x_i) - [W_i - e(x_i)]\tau(x_i) $$
+
+
+the ordinary least squares objective function is
+
+$$L(\tau(.)) =  \frac{1}{n}\sum_{i=1}^n\hat{u}_i^2 = \frac{1}{n}\sum_{i=1}^n\left[ Y_i - \hat{m}(x_i) - [W_i - \hat{e}(x_i)]\tau(x_i)  \right]^2 $$
+
+With some algebra we get
+
+$$L(\tau(.)) =  \frac{1}{n}\sum_{i=1}^n\left\{\left[ \frac{Y_i - \hat{m}(x_i)}{W_i - \hat{e}(x_i)} - \tau(x_i)  \right]^2\times[W_i - \hat{e}(x_i)]^2\right\} $$
+
+To overcome over-fitting, the R-loss function uses a cross-validation procedure to estimate the parameters $m$ and $e$, i.e.
+
+$$L(\tau(.)) =  \frac{1}{n}\sum_{i=1}^n\left\{\left[ \frac{Y_i - \hat{m}^{-q(i)}(x_i)}{W_i - \hat{e}^{-q(i)}(x_i)} - \tau(x_i)  \right]^2\times[W_i - \hat{e}^{-q(i)}(x_i)]^2\right\} $$
+
+where $^{-q(i)}$ represents the $q\in Q$ fold that $i$ was predicted in.
+Now add a complexity regularization term ($\Lambda$), to the target equation of $\tau$, and we end up with the equation in [@nie2021quasi]:
+
+$$\hat{\tau} = \arg\min [L(\tau) + \Lambda(\tau)] $$ 
+
+That is, differently from the U-learner above, the R-learner 
+
+1. Is equivalent to predicting the psuedo outcome $U(x_i)=\frac{Y_i - \hat{m}(x_i)}{W_i - \hat{e}(x_i)}$, but with each observation weighted with $[W_i-\hat{e}(x_i)]^2$.
+2. Corrects the $\mu$ and $e$ fitting procedures for over-fitting.
+3. Adds regularization for complexity. 
+
+
+```{r R-learner algo., eval = FALSE, highlight= F}
+R-Learner: Y,W,X
+1. Fit (Y ~ X) and predict \hat{\mu}(X) using cross-validation prediction
+2. Fit (W ~ X) and predict \hat{e}(X) using cross-validation prediction
+3. Residualize u_y(X) = Y - \hat{\mu}(X) and u_e(X) = W - \hat{e}(X)
+4. Calculate psuedo-outcome U(X) = u_y(X) / u_e(X)
+5. Calculate weights = [W - \hat{e}(X)]^2
+6. Fit (U ~ X) using weights. Optional: regularize complexity
+```
+
+
+A generic function for a R -learner may look like:
+
+```{r R-learner, function}
+CATE_R_Learner <- function(Y,W,X,
+                           ML_model = "gbm",
+                           k_folds = 5, ml_grid = NULL) {
+  
+  test <- data.frame(X)
+  
+  ### fit a model for (Y~X)
+  train.Y <- data.frame(Y = Y, X)
+  
+  # split for cross-validation prediction (indicates which fold observation belongs to)
+  ind <- caret::createFolds(Y, k = k_folds, list=FALSE)
+  
+  # empty vector
+  mu = c()
+  
+  # loop over folds
+  for(i in 1:k_folds) {
+    # save observations outside of fold for training
+    train.Y.fold = train.Y[ind != i,]
+    # save observations in fold for prediction
+    test.Y.fold = test[ind == i,]
+    
+    # fit a model on observations outside of fold
+    model.Y <- caret::train(
+      Y ~ .,
+      data = train.Y.fold,
+      method = ML_model,
+      trControl = caret::trainControl(method = "cv", number = k_folds),
+      tuneGrid = ml_grid
+    )
+    
+    # predict on observations in fold, and append to vector
+    mu <- c(mu,stats::predict(model.Y, newdata = test.Y.fold))
+  }
+
+  ### fit a model for (W~X)
+  train.W <- data.frame(W = W, X)
+  
+  # split for cross-validation prediction (indicates which fold observation belongs to)
+  ind <- caret::createFolds(Y, k = k_folds, list=FALSE)
+  
+  # empty vector
+  e = c()
+  
+  # loop over folds
+  for(i in 1:k_folds) {
+    # save observations outside of fold for training
+    train.W.fold = train.W[ind != i,]
+    # save observations in fold for prediction
+    test.W.fold = test[ind == i,]
+    
+    # fit a model on observations outside of fold
+    model.W <- caret::train(
+      W ~ .,
+      data = train.W.fold,
+      method = ML_model,
+      trControl = caret::trainControl(method = "cv", number = k_folds),
+      tuneGrid = ml_grid
+    )
+    
+    # predict on observations in fold, and append to vector
+    e <- c(e,stats::predict(model.W, newdata = test.W.fold))
+  }
+  
+  ### residualize, fit psuedo-outcome and calculate weights
+  U = (Y - mu) / (W - e)
+  weights = (W - e)^2
+  train.U <- data.frame(U = U, X, weights = weights)
+  
+  model.U <- caret::train(
+    U ~ . - weights,
+    data = train.U,
+    method = ML_model,
+    trControl = caret::trainControl(method = "cv", number = k_folds),
+    tuneGrid = ml_grid,
+    weights = weights
+  )
+
+  tau <- stats::predict(model.U, newdata = test)
+  
+  CATE_R <- list("train.Y" = train.Y,
+                 "train.W" = train.W,
+                 "fit.U" = model.U,
+                 "train.U" = train.U,
+                 "mu.hat" = mu, 
+                 "e.hat" = e, 
+                 "U.hat" = U,
+                 "weights" = weights,
+                 "tau.hat" = tau)
+  
+  class(CATE_R) <- "R_learner"
+  
+  return(CATE_R)
+}
+```
+
+
+There is package built for the R-Learner, can find it on Github: [Git R-Learner Repo](https://github.com/xnie/rlearner).
+
+***
+
+# Causal Forests 
+
+Refer to [@athey2019estimating] for an application and to [@athey2019generalized;@wager2018estimation] for theory.
+
+## Basic Intro - A Causal Tree
+
+**Regression tree.** A regression tree partitions the covariate space $X$, and predicts $\hat{Y}$ using the mean of the outcome $Y$ in each partition. The partition that includes $X=x$ is called the leaf of $x$, denoted by $L(x)$. The prediction from a regression tree for observation $(y_i,x_i)$ is the mean of the outcome of all observations in the leaf that contain $X=x_i$, i.e. $$\hat{Y}(x_i) = \frac{1}{|\{i|x_i\in L(x)\}|}\sum_{i|x_i\in L(x)}y_i$$
+that is, the sum of $Y$ in $L(x)$ divided by the number of observations in $L(x)$.
+
+
+**Causal tree.** A casual tree partitions the covariate space $X$, and predicts $\hat{\tau}$ using the difference in mean outcome between a treated group and non-treated group in each partition. As before, the partition that includes $X=x$ is called the leaf of $x$, denoted by $L(x)$. We denote by $W\in\{0,1\}$ the non-treatment and treated groups respectively. The prediction from a casual tree for observation $(y_i,x_i,w_i)$ is the mean of $Y$ of all observations in the leaf that contain $X=x_i$ and are treated $w=1$ minus the mean of $Y$ of all observations in the leaf that conatins $X=x_i$ and are not treated $w=0$. 
+\begin{align}
+  \hat{\tau}(x) = &\frac{1}{|\{i|w_i=1,x_i\in L(x)\}|}\sum_{\{i|w_i=1,x_i\in L(x)\}}y_i \nonumber \\ 
+        &-\frac{1}{|\{i|w_i=0,x_i\in L(x)\}|}\sum_{\{i|w_i=0,x_i\in L(x)\}}y_i.
+\end{align}
+
+which can be viewed as a sample analog of the ATE in leaf $L(x)$.
+
+## A Causal Forest
+
+We define a causal forest by generating an ensemble of $B$ causal trees. Each causal tree $b\in B$ provides an estimate for $\hat{\tau}_b(x)$ using the above equation. For the entire causal forest, we use the average of all trees to estimate the CATE: $$\hat{\tau} (x) = B^{-1}\sum^B_{b=1}\hat{\tau}_b(x)$$
+
+## The GRF algorithm
+
+Currently, using a causal forest to estimate the CATE is implemented via the GRF package in R. Here we implement the algorithm 1 from [@athey2019estimating]:
+
+```{r grf function}
+CATE_CF_Learner <- function(Y,W,X) {
+
+  test <- data.frame(X)
+  
+  # fit a model for (Y~X)
+  train.Y <- data.frame(Y = Y, X)
+  model.Y <- grf::regression_forest(X, Y)
+  mu <- stats::predict(model.Y, newdata = test)[,1]
+  
+  # fit a model for (W~X)
+  train.W <- data.frame(W = W, X)
+  model.W <- grf::regression_forest(X, W)
+  e <- stats::predict(model.W, newdata = test)[,1]
+  
+  # fit the causal forest
+  train.CF = data.frame(Y=Y,W=W,X)
+  model.CF = grf::causal_forest(X,Y,W,
+                          Y.hat = mu, W.hat = e)
+
+  tau <- stats::predict(model.CF, newdata = test)[,1]
+  
+  CATE_CF <- list("fit.mu" = model.Y,
+                 "train.Y" = train.Y,
+                 "fit.e" = model.W,
+                 "train.W" = train.W,
+                 "fit.CF" = model.CF,
+                 "train.CF" = train.CF,
+                 "mu.hat" = mu, 
+                 "e.hat" = e, 
+                 "tau.hat" = tau)
+  
+  class(CATE_CF) <- "CF_learner"
+  
+  return(CATE_CF)
+}
+```
+
+***
+
+# Comparisions
+
+***
+
+## Simulation DGP
+
+Here we provide a function for simulated a data table with $p$ covariates and $N$ observations. 
+
+```{r dgp1}
+# using package simstudy
+sim_data1 <- function(N = 1000, p=3,
+                     means_X = rep(0, times= 3),
+                     sd_X = rep(0.1, times= 3),
+                     rho = 0.3,
+                     a1 = .1, a0 = .1,
+                     b1 = .1, b0 = .1,
+                     mean_e = 0, sd_e = .1) {
+  dt <- simstudy::genCorData(N, mu = means_X, sigma = sd_X, rho = rho, corstr = "cs")
+
+  # generate treatment
+  dt <- simstudy::trtAssign(dt, n = 2, balanced = TRUE, grpName = "W")
+  
+  # generate outcome
+  dt <- dt %>% 
+    mutate(
+      mu0 = a0*V1 - b0*V2,
+      tau = a1*W*(V1 > 0) - b1*W*(V2 > 0),
+      mu1 = mu0 + tau,
+      Y = W*mu0 + (1-W)*mu1 + rnorm(N, mean = mean_e, sd = sd_e)
+    )
+  
+  return(list(
+    x = select(dt, contains("V")),
+    w = dt$W, y = dt$Y,
+    p = rep(0.5, times = N),
+    mu0 = dt$mu0, mu1 = dt$mu1, tau = dt$tau)
+  )
+}
+```
+
+From R-Learner package in Github
+
+```{r dgp2}
+sim_data2 = function(n = 1000) {
+  x = stats::model.matrix(~.-1, data.frame("x1" = rnorm(n), "x2"= rnorm(n), "x3" = rnorm(n), "x4" = rnorm(n), "x5" = rnorm(n), "x6" = rnorm(n)))
+	p = 0.5
+	w = as.numeric(rbinom(n,1,p)==1)
+  m = pmax(0, x[,1] + x[,2], x[,3]) + pmax(0, x[,4] + x[,5])
+  tau = x[,1] + log(1 + exp(x[,2]))
+	mu1 = m + tau/2
+	mu0 = m - tau/2
+	y = w*mu1 + (1-w) * mu0 + 0.5*rnorm(n)
+	list(x=x, w=w, y=y, p=p, m=m, mu0=mu0, mu1=mu1, tau=tau)
+}
+```
+
+***
+
+## Compare CATE Estimates
+
+For each learner we showed above, we will test how the estimated $\hat{\tau}$ is different from the true $\tau$. Hence the error is not in predicting the outcome, but in the causal effect. That is, we define the causal error to be $\hat{e}(x) = \tau(x) - \hat{\tau}(x)$, and calculate per simulation the root of the mean of the square of the causal error, that is $$RMSCE = \sqrt{\frac{1}{N}\sum_{i=1}^N(\hat{e}(x_i))^2}$$
+
+```{r compare single simulation, results = 'hide'}
+N = 1000
+dt <- sim_data1(N)
+Y = dt$y; W = dt$w; X = dt$x
+e = rep(0.5, times = N)
+
+rmsce <- function(tau, tau.hat) {
+  rmsce = sqrt(mean((tau - tau.hat)^2))
+  return(rmsce)
+}
+rmsce_S <- rmsce(dt$tau, CATE_S_Learner(Y=Y, W=W, X=X)$tau.hat)
+rmsce_T <- rmsce(dt$tau, CATE_T_Learner(Y=Y, W=W, X=X)$tau.hat)
+rmsce_DB <- rmsce(dt$tau, CATE_DB_Learner(Y=Y, W=W, X=X, e=e)$tau.hat)
+rmsce_X <- rmsce(dt$tau, CATE_X_Learner(Y=Y, W=W, X=X, g=e)$tau.hat)
+rmsce_U <- rmsce(dt$tau, CATE_U_Learner(Y=Y, W=W, X=X)$tau.hat)
+rmsce_R <- rmsce(dt$tau, CATE_R_Learner(Y=Y, W=W, X=X)$tau.hat)
+rmsce_CF <- rmsce(dt$tau, CATE_CF_Learner(Y=Y, W=W, X=X)$tau.hat)
+```
+
+Lets review the results:
+
+```{r review single comparasion}
+tribble(
+  ~learner, ~rmsce,
+  "S", rmsce_S,
+  "T", rmsce_T,
+  "DB", rmsce_DB,
+  "X", rmsce_X,
+  "U", rmsce_U,
+  "R", rmsce_R,
+  "CF", rmsce_CF
+)
+```
+
+Now lets see the mean of 20 such simulations
+
+```{r compare multiple simulation first dgp, results = 'hide'}
+num_sims = 20
+full = NULL
+dgp = sim_data1
+
+for(i in 1:num_sims) {
+  N = 500
+  dt <- dgp(N)
+  Y = dt$y; W = dt$w; X = dt$x
+  e = rep(0.5, times = N)
+  
+  rmsce <- function(tau, tau.hat) {
+    rmsce = sqrt(mean((tau - tau.hat)^2))
+    return(rmsce)
+  }
+  rmsce_S <- rmsce(dt$tau, CATE_S_Learner(Y=Y, W=W, X=X)$tau.hat)
+  rmsce_T <- rmsce(dt$tau, CATE_T_Learner(Y=Y, W=W, X=X)$tau.hat)
+  rmsce_DB <- rmsce(dt$tau, CATE_DB_Learner(Y=Y, W=W, X=X, e=e)$tau.hat)
+  rmsce_X <- rmsce(dt$tau, CATE_X_Learner(Y=Y, W=W, X=X, g=e)$tau.hat)
+  rmsce_U <- rmsce(dt$tau, CATE_U_Learner(Y=Y, W=W, X=X)$tau.hat)
+  rmsce_R <- rmsce(dt$tau, CATE_R_Learner(Y=Y, W=W, X=X)$tau.hat)
+  rmsce_R_package <- rmsce(dt$tau, predict(object = rlearner::rboost(y=Y, w=W, x=as.matrix(X))))
+  rmsce_CF <- rmsce(dt$tau, CATE_CF_Learner(Y=Y, W=W, X=X)$tau.hat)
+  learners = c("S","T","DB","X","U","R","CF")
+  rmsce = c(rmsce_S, rmsce_T, rmsce_DB, rmsce_X, rmsce_U, rmsce_R, rmsce_CF)
+  
+  temp = data.frame(learner = learners, rmsce, simulation = i)
+  
+  full = rbind(full, temp)
+}
+```
+
+Lets review the results:
+
+```{r print comparision 1}
+full %>% group_by(learner) %>% 
+  summarise(mean_rmsce = mean(rmsce),
+            median_rmsce = median(rmsce),
+            num_sims = max(simulation))
+```
+
+
+Now lets see the mean of 20 such simulations, for a little more complicated DGP
+
+
+```{r compare multiple simulation second dgp, results = 'hide'}
+num_sims = 20
+full = NULL
+dgp = sim_data2
+
+for(i in 1:num_sims) {
+  N = 500
+  dt <- dgp(N)
+  Y = dt$y; W = dt$w; X = dt$x
+  e = rep(0.5, times = N)
+  
+  rmsce <- function(tau, tau.hat) {
+    rmsce = sqrt(mean((tau - tau.hat)^2))
+    return(rmsce)
+  }
+  rmsce_S <- rmsce(dt$tau, CATE_S_Learner(Y=Y, W=W, X=X)$tau.hat)
+  rmsce_T <- rmsce(dt$tau, CATE_T_Learner(Y=Y, W=W, X=X)$tau.hat)
+  rmsce_DB <- rmsce(dt$tau, CATE_DB_Learner(Y=Y, W=W, X=X, e=e)$tau.hat)
+  rmsce_X <- rmsce(dt$tau, CATE_X_Learner(Y=Y, W=W, X=X, g=e)$tau.hat)
+  rmsce_U <- rmsce(dt$tau, CATE_U_Learner(Y=Y, W=W, X=X)$tau.hat)
+  rmsce_R <- rmsce(dt$tau, CATE_R_Learner(Y=Y, W=W, X=X)$tau.hat)
+  rmsce_CF <- rmsce(dt$tau, CATE_CF_Learner(Y=Y, W=W, X=X)$tau.hat)
+  learners = c("S","T","DB","X","U","R","CF")
+  rmsce = c(rmsce_S, rmsce_T, rmsce_DB, rmsce_X, rmsce_U, rmsce_R, rmsce_CF)
+  
+  temp = data.frame(learner = learners, rmsce, simulation = i)
+  
+  full = rbind(full, temp)
+}
+```
+
+
+Lets review the results:
+
+```{r print comparision 2}
+full %>% group_by(learner) %>% 
+  summarise(mean_rmsce = mean(rmsce),
+            median_rmsce = median(rmsce),
+            num_sims = max(simulation))
+```
+
+# References
