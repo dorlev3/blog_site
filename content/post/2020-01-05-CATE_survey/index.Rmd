@@ -664,7 +664,7 @@ sim_data2 = function(n = 1000) {
 
 ## Compare CATE Estimates
 
-For each learner we showed above, we will test how the estimated $\hat{\tau}$ is different from the true $\tau$. Hence the error is not in predicting the outcome, but in the causal effect. That is, we define the causal error to be $\hat{e}(x) = \tau(x) - \hat{\tau}(x)$, and calculate per simulation the root of the mean of the square of the causal error, that is $$RMSCE = \sqrt{\frac{1}{N}\sum_{i=1}^N(\hat{e}(x_i))^2}$$
+For each learner we showed above, we will test how the estimated $\hat{\tau}$ is different from the true $\tau$. Hence the error is not in predicting the outcome, but in the causal effect. That is, we define the causal error to be $\hat{e}(x) = \tau(x) - \hat{\tau}(x)$, and calculate per simulation the root of the mean of the square of the causal error, that is $$RMSCE = \sqrt{\frac{1}{N}\sum_{i=1}^N(\hat{e}(x_i))^2}$$ This statisitic cannot be known outside of simulations, due to $\tau$ being unknown. But inside simulations, we set $\tau=...$, and so can calculate the accuracy of each method. 
 
 ```{r compare single simulation, results = 'hide'}
 N = 1000
@@ -704,8 +704,9 @@ Now lets see the mean of 20 such simulations
 
 ```{r compare multiple simulation first dgp, results = 'hide'}
 num_sims = 20
-full = NULL
+N = 500
 dgp = sim_data1
+full = NULL
 
 for(i in 1:num_sims) {
   N = 500
@@ -749,11 +750,12 @@ Now lets see the mean of 20 such simulations, for a little more complicated DGP
 
 ```{r compare multiple simulation second dgp, results = 'hide'}
 num_sims = 20
-full = NULL
+N = 500
 dgp = sim_data2
+full = NULL
 
 for(i in 1:num_sims) {
-  N = 500
+  
   dt <- dgp(N)
   Y = dt$y; W = dt$w; X = dt$x
   e = rep(0.5, times = N)
