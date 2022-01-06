@@ -1,0 +1,523 @@
+---
+title: CATE Estimation Methods
+author: Dor Leventer
+date: '2022-01-06'
+tags:
+  - causal inference
+  - machine learning
+  - CATE
+output:
+  html_document:
+    theme: readable
+    toc: yes
+    toc_depth: 4
+    toc_float: yes
+bibliography: biblio.bib
+---
+
+<script src="/rmarkdown-libs/header-attrs/header-attrs.js"></script>
+
+
+<hr />
+<div id="introduction" class="section level1">
+<h1>Introduction</h1>
+<p>This post is a summary of CATE estimation procedures using machine learning methods. The purpose is to survey contemporary methods, and provide very basic functions so that the reader (me and other people interested in this subject) understand the difference between the various algorithms. And, perhaps use these functions as a starting point in estimation procedures in empirical projects. Comments (errors, corrections, and so on) are more than welcome, this is mainly for me to learn on the subject.</p>
+<hr />
+</div>
+<div id="framework---potential-outcomes" class="section level1">
+<h1>Framework - Potential Outcomes</h1>
+<p>We consider the case of a binary treatment mechanism <span class="math inline">\(W\in\{0,1\}\)</span>. We follow convention and denote the outcome <span class="math inline">\(Y\)</span> of individual <span class="math inline">\(i\)</span> if she were treated <span class="math inline">\(W=1\)</span> as <span class="math inline">\(Y^1\)</span>. Similarly we denote the potential outcome if she were not treated <span class="math inline">\(W=0\)</span> as <span class="math inline">\(Y^0\)</span>. The average treatment effect (ATE) is defined as a constant for the population: <span class="math display">\[ATE=\tau=E[Y^1-Y^0]\]</span> The ATE is identifiable under the following set of assumptions</p>
+<ol style="list-style-type: decimal">
+<li>CIA: <span class="math inline">\(Y^a\perp W|Z\)</span>, which we read as: the potential outcomes are not determined by the treatment if we condition on a set of variables, denoted <span class="math inline">\(Z\)</span>.</li>
+<li>SUTVA: <span class="math inline">\(Y^w=Y|W=w\)</span>, which we read as: the potential outcomes is equal the observed outcome if we condition on actually getting the treatment value of the potential outcome</li>
+<li>Positivity: <span class="math inline">\(Pr(W=1|Z)\in(0,1)\)</span>, which we read as: for every combination of <span class="math inline">\(Z\)</span> there is some positive probability of getting treated or un-treated.</li>
+</ol>
+<p>The ATE is defined as a constant in the population. The conditional average treatment effect (CATE) is defined as a function of some set of variables, denoted <span class="math inline">\(X\)</span>: <span class="math display">\[CATE=\tau(x)=E[Y^1-Y^0|X=x]\]</span></p>
+<p>Below we go over several machine learning (ML) methodologies to estimate <span class="math inline">\(\hat{\tau}(x)\)</span>.</p>
+<hr />
+</div>
+<div id="simplest-learners" class="section level1">
+<h1>Simplest Learners</h1>
+<p>The term meta-learner is a methodolgy using ML to estimate the CATE. We begin with the simplest two: S- and T-learners.</p>
+<hr />
+<div id="s-learner" class="section level2">
+<h2>S-Learner</h2>
+<p>The S-learner (S from single) fits a ML model to the data where <span class="math inline">\(Y\)</span> is the outcome variable and <span class="math inline">\((W,Z)\)</span> is the matrix of explaining variables, i.e. <span class="math inline">\((Y~W,Z)\)</span>. Using this model the S-learner estimates conditional means for the treated and the un-treated by predicting on data with all treated and all un-treated. That is:</p>
+<pre class="text"><code>S-Learner: Y,W,X,
+1. Fit (Y ~ X,W)
+2. Predict \hat{\mu}^1(X) = E[Y|W=1,X], i.e. setting W=1
+3. Predict \hat{\mu}^0(X) = E[Y|W=0,X], i.e. setting W=0
+4. Calculate \hat{tau}(X) = \hat{\mu}^1(X) - \hat{\mu}^0(X)</code></pre>
+<p>A generic function for a S-learner may look like:</p>
+<pre class="r"><code>CATE_S_Learner &lt;- function(Y,W,X,
+                           ML_model = &quot;gbm&quot;,
+                           k_folds = 5, ml_grid = NULL) {
+  
+  train &lt;- data.frame(Y = Y, W = W, X)
+  
+  model &lt;- caret::train(
+    Y ~ .,
+    data = train,
+    method = ML_model,
+    trControl = caret::trainControl(method = &quot;cv&quot;, number = k_folds),
+    tuneGrid = ml_grid
+  )
+  
+  test.0 &lt;- data.frame(W = W, X) %&gt;% mutate(W = 0)
+  test.1 &lt;- data.frame(W = W, X) %&gt;% mutate(W = 1)
+  mu.0 = stats::predict(model, newdata = test.0)
+  mu.1 = stats::predict(model, newdata = test.1)
+  
+  tau = mu.1 - mu.0
+  
+  CATE_S &lt;- list(&quot;fit.mu&quot; = model,
+                 &quot;train.dt&quot; = train,
+                 &quot;mu.0.hat&quot; = mu.0, 
+                 &quot;mu.1.hat&quot; = mu.1, 
+                 &quot;tau.hat&quot; = tau)
+  
+  class(CATE_S) &lt;- &quot;S_learner&quot;
+  
+  return(CATE_S)
+}</code></pre>
+<hr />
+</div>
+<div id="t-learner" class="section level2">
+<h2>T-Learner</h2>
+<p>The T-learner (T from two) fits a ML model twice: once to the partition of the data of the treated, and second to the partition of the data of the un-treated. Then we fit each model to the data (this time not setting <span class="math inline">\(W\)</span>), predict means, and estimating the CATE.</p>
+<pre class="text"><code>T-Learner: Y,W,X
+1. Fit (Y ~ X), only using W=1
+2. Fit (Y ~ X), only using W=0
+3. Predict \hat{\mu}^1(X) = E[Y|X], using the fit on W=1
+4. Predict \hat{\mu}^0(X) = E[Y|X], using the fit on W=0
+5. Calculate \hat{tau}(X) = \hat{\mu}^1(X) - \hat{\mu}^0(X)</code></pre>
+<p>A generic function for a T-learner may look like:</p>
+<pre class="r"><code>CATE_T_Learner &lt;- function(Y,W,X,
+                           ML_model = &quot;gbm&quot;,
+                           k_folds = 5, ml_grid = NULL) {
+  
+  train.0 &lt;- data.frame(Y = Y, W = W, X) %&gt;% filter(W == 0) %&gt;% select(-W)
+  train.1 &lt;- data.frame(Y = Y, W = W, X) %&gt;% filter(W == 1) %&gt;% select(-W)
+  
+  model.0 &lt;- caret::train(
+    Y ~ .,
+    data = train.0,
+    method = ML_model,
+    trControl = caret::trainControl(method = &quot;cv&quot;, number = k_folds),
+    tuneGrid = ml_grid
+  )
+  
+  model.1 &lt;- caret::train(
+    Y ~ .,
+    data = train.1,
+    method = ML_model,
+    trControl = caret::trainControl(method = &quot;cv&quot;, number = k_folds),
+    tuneGrid = ml_grid
+  )
+  
+  test &lt;- data.frame(X)
+  mu.0 = stats::predict(model.0, newdata = test)
+  mu.1 = stats::predict(model.1, newdata = test)
+  
+  tau = mu.1 - mu.0
+  
+  CATE_T &lt;- list(&quot;fit.mu.0&quot; = model.0,
+                 &quot;fit.mu.1&quot; = model.1,
+                 &quot;train.dt&quot; = train,
+                 &quot;mu.0.hat&quot; = mu.0, 
+                 &quot;mu.1.hat&quot; = mu.1, 
+                 &quot;tau.hat&quot; = tau)
+  
+  class(CATE_T) &lt;- &quot;T_learner&quot;
+  
+  return(CATE_T)
+}</code></pre>
+<hr />
+</div>
+</div>
+<div id="more-sophisticated-learners" class="section level1">
+<h1>More Sophisticated Learners</h1>
+<hr />
+<div id="db-learner" class="section level2">
+<h2>DB-Learner</h2>
+<p>The DB-learner <span class="citation">(<a href="#ref-fan2020estimation" role="doc-biblioref">Fan et al. 2020</a>)</span> (Double-Robust) takes its name from its property, that if either the model of the conditional mean of the outcome or the model of the propensity score is correct then it is a consistent estimate of the CATE. The estimator incorporates an estimate of <span class="math inline">\(\mu^w(x) = E[Y|X=x,W=w]\)</span> with the propensity score <span class="math inline">\(e(x)=Pr(W=1|X=x)\)</span>, as follows: <span class="math display">\[\tau(x)_{DB} = \mu^1(x)  + \frac{W\times(Y-\mu^1(x))}{e(x)} - \mu^0(x) - \frac{(1-W)\times(Y-\mu^0(x))}{1-e(x)}\]</span></p>
+<pre class="text"><code>DB-Learner: Y,W,X,e
+1. Predict \hat{\mu}^1(X) and \hat{\mu}^0(X) using S- or T-learner
+2. Calculate \hat\{tau}(X) = \hat{\mu}^1(X) + e(x)^(-1)*W*(Y 
+- \hat{\mu}^1(X)) - \hat{\mu}^0(X) - (1-e(x))^(-1)*(1-W)*(Y - \hat{\mu}^0(X))</code></pre>
+<p>A generic function for a DB-learner may look like:</p>
+<pre class="r"><code>CATE_DB_Learner &lt;- function(Y,W,X,e,
+                           ML_model = &quot;gbm&quot;,
+                           k_folds = 5, ml_grid = NULL) {
+  
+  # begin with T-learner for mu.0 and mu.1
+  T.learner = CATE_T_Learner(Y=Y, W=W, X=X, 
+                             ML_model = ML_model, k_folds = k_folds, ml_grid = ml_grid)
+  mu.0 = T.learner$mu.0.hat
+  mu.1 = T.learner$mu.1.hat
+  
+  # calculate CATE
+  tau = mu.1 + (e^(-1))*W*(Y - mu.1) - 
+    (mu.0 + ((1-e^(-1))*(1-W)*(Y - mu.0)))
+  
+  CATE_DB &lt;- list(&quot;fit.mu.0&quot; = T.learner$T.fit.0,
+                  &quot;fit.mu.1&quot; = T.learner$T.fit.1,
+                  &quot;train.dt&quot; = data.frame(Y=Y,W=W,X),
+                  &quot;mu.0.hat&quot; = mu.0, 
+                  &quot;mu.1.hat&quot; = mu.1, 
+                  &quot;e&quot; = e,
+                  &quot;tau.hat&quot; = tau)
+  
+  class(CATE_DB) &lt;- &quot;DB_learner&quot;
+  
+  return(CATE_DB)
+}</code></pre>
+<hr />
+</div>
+<div id="x-learner" class="section level2">
+<h2>X-Learner</h2>
+<p>The <span class="math inline">\(X-Learner\)</span> <span class="citation">(<a href="#ref-kunzel2019metalearners" role="doc-biblioref">Künzel et al. 2019</a>)</span> begins with estimating <span class="math inline">\(E[Y^a|X]\)</span> using ML models as in the T-learner above. Then, the learner imputes an individual treatment effect (ITE) <span class="math inline">\(D_i = W(Y - \mu^0(x_i)) + (1-W)(\mu^1(x_i)-Y)\)</span> . Finally, it fits a second set of ML models to <span class="math inline">\(D\)</span> to estimate <span class="math inline">\(\tau_0\)</span> and <span class="math inline">\(\tau_1\)</span>, i.e. the CATE among the un-treated and the treated. The final estimate for the CATE is a weighted average of the two: <span class="math display">\[\tau(x)=\tau_1(x)\times g(x) + \tau_0(x)\times(1-g(x))\]</span> The authors recommend using the propensity score <span class="math inline">\(e(x)=Pr(W=1|X=x)\)</span>.</p>
+<pre class="text"><code>X-Learner: Y,W,X,g
+1. Predict \hat{\mu}^1(X) and \hat{\mu}^0(X) using S- or T-learner
+2. Impute D = Y^1 - \hat{\mu}^0(X_i), if W=1
+3. Impute D = \hat{\mu}^1(X_i) - Y^0, if W=0 
+4. Fit (D ~ X,W) using S- or T-learner
+5. Predict \hat{\tau}^w(X) = E[D|X,W] using the fit on D
+6. Calculate \hat{tau}(X) = g(x)\hat{\tau}^1(X) - (1-g(x))\hat{\tau}^0(X)</code></pre>
+<p>where <span class="math inline">\(g(x)\)</span> is some weighting function, e.g. <span class="math inline">\(g(x)=e(x)\)</span>, <span class="math inline">\(\hat{\tau}^1\)</span> is the CATE estimate for the treatment and <span class="math inline">\(\hat{\tau}^0\)</span> for the un-treated.</p>
+<p>A generic function for a X-learner may look like:</p>
+<pre class="r"><code>CATE_X_Learner &lt;- function(Y,W,X,g,
+                           ML_model = &quot;gbm&quot;,
+                           k_folds = 5, ml_grid = NULL) {
+  
+  # begin with T-learner for mu.0 and mu.1
+  T.learner.1 = CATE_T_Learner(Y=Y, W=W, X=X,
+                               ML_model = ML_model, k_folds = k_folds, ml_grid = ml_grid)
+  mu.0 = T.learner.1$mu.0.hat
+  mu.1 = T.learner.1$mu.1.hat
+  
+  # impute individual treatment effects
+  D = W*(Y - mu.0) + (1-W)*(mu.1 - Y)
+  
+  # fit a T-learner with D as outcome
+  T.learner.2 = CATE_T_Learner(Y=D, W=W, X=X,
+                               ML_model = ML_model, k_folds = k_folds, ml_grid = ml_grid)
+  
+  # use weighted average of predicted values of D as final CATE estimate
+  tau.0 = T.learner.2$mu.0.hat
+  tau.1 = T.learner.2$mu.1.hat
+  tau = g*tau.1 + (1-g)*tau.0
+  
+  CATE_X &lt;- list(&quot;fit.mu.0&quot; = T.learner.1$T.fit.0,
+                 &quot;fit.mu.1&quot; = T.learner.1$T.fit.1,
+                 &quot;train.mu&quot; = data.frame(Y=Y,W=W,X),
+                 &quot;fit.tau.0&quot; = T.learner.2$T.fit.0,
+                 &quot;fit.tau.1&quot; = T.learner.2$T.fit.1,
+                 &quot;train.tau&quot; = data.frame(D=D,W=W,X),
+                 &quot;tau.0.hat&quot; = tau.0, 
+                 &quot;tau.1.hat&quot; = tau.1, 
+                 &quot;g&quot; = g,
+                 &quot;tau.hat&quot; = tau)
+  
+  class(CATE_X) &lt;- &quot;X_learner&quot;
+  
+  return(CATE_X)
+}</code></pre>
+<hr />
+</div>
+</div>
+<div id="residualizing-learners" class="section level1">
+<h1>Residualizing Learners</h1>
+<hr />
+<div id="u-learner" class="section level2">
+<h2>U-Learner</h2>
+<p>Featured in <span class="citation"><a href="#ref-nie2021quasi" role="doc-biblioref">Nie and Wager</a> (<a href="#ref-nie2021quasi" role="doc-biblioref">2021</a>)</span>, this learner uses the residuals in estimation of <span class="math inline">\(E[Y|X]\)</span> and <span class="math inline">\(E[e|X]\)</span> to estimate the CATE. It is useful in understanding the R-learner, discussed below. Define as <span class="math inline">\(\mu_w(x):=E[Y^w|X=x]\)</span> the conditional potential outcome expectation, and we can write the equation for the outcome as
+<span class="math display">\[ Y_i = \mu_0(x_i) + W_i\times \tau(x_i) + u_i \]</span></p>
+<p>Next, define the conditional outcome expectation <span class="math inline">\(\mu(x):=E[Y|X=x]\)</span> which given a propensity score <span class="math inline">\(e\)</span> is equal to
+<span class="math display">\[E[Y|X=x_i] = \mu_0(x_i) + e(x_i)\times \tau(x_i)\]</span></p>
+<p>Lastly, we get that
+<span class="math display">\[ Y_i - \mu(x_i) = W_i\times \tau(x_i) + u_i - e(x_i)\times \tau(x_i) = [W_i - e(x_i)]\tau(x_i) + u_i \]</span></p>
+<p>Taking expectations, and using the assumption of <span class="math inline">\(Y^0,Y^1\perp W|X\)</span>,</p>
+<p><span class="math display">\[ \tau(x_i) = \frac{E[Y_i - \mu(x_i)|X]}{E[W_i - e(x_i)|X]}\]</span></p>
+<p>The U-learner uses the above formulation, and estimates <span class="math inline">\(\tau(X)\)</span> by fitting ML models for <span class="math inline">\(\mu(X)\)</span> and <span class="math inline">\(e(X)\)</span>.</p>
+<pre class="text"><code>U-Learner: Y,W,X
+1. Fit (Y ~ X) and predict \hat{\mu}(X) 
+2. Fit (W ~ X) and predict \hat{e}(X)
+3. Residualize u_y(X) = Y - \hat{\mu}(X) and u_e(X) = W - \hat{e}(X)
+4. Calculate psuedo-outcome U(X) = u_y(X) / u_e(X)
+5. Fit (U ~ X) and predict \hat{tau}(X)</code></pre>
+<p>A generic function for a U-learner may look like:</p>
+<pre class="r"><code>CATE_U_Learner &lt;- function(Y,W,X,
+                           ML_model = &quot;gbm&quot;,
+                           k_folds = 5, ml_grid = NULL) {
+  
+  test &lt;- data.frame(X)
+  
+  # fit a model for (Y~X)
+  train.Y &lt;- data.frame(Y = Y, X)
+  
+  model.Y &lt;- caret::train(
+    Y ~ .,
+    data = train.Y,
+    method = ML_model,
+    trControl = caret::trainControl(method = &quot;cv&quot;, number = k_folds),
+    tuneGrid = ml_grid
+  )
+  
+  
+  mu &lt;- stats::predict(model.Y, newdata = test)
+  
+  # fit a model for (W~X)
+  train.W &lt;- data.frame(W = W, X)
+  
+  model.W &lt;- caret::train(
+    W ~ .,
+    data = train.W,
+    method = ML_model,
+    trControl = caret::trainControl(method = &quot;cv&quot;, number = k_folds),
+    tuneGrid = ml_grid
+  )
+  
+  e &lt;- stats::predict(model.W, newdata = test)
+  
+  # residualize and fit psuedo-outcome
+  U = (Y - mu) / (W - e)
+  train.U &lt;- data.frame(U = U, X)
+  
+  model.U &lt;- caret::train(
+    U ~ .,
+    data = train.U,
+    method = ML_model,
+    trControl = caret::trainControl(method = &quot;cv&quot;, number = k_folds),
+    tuneGrid = ml_grid
+  )
+
+  tau &lt;- stats::predict(model.U, newdata = test)
+  
+  CATE_U &lt;- list(&quot;fit.mu&quot; = model.Y,
+                 &quot;train.Y&quot; = train.Y,
+                 &quot;fit.e&quot; = model.W,
+                 &quot;train.W&quot; = train.W,
+                 &quot;fit.U&quot; = model.U,
+                 &quot;train.U&quot; = train.U,
+                 &quot;mu.hat&quot; = mu, 
+                 &quot;e.hat&quot; = e, 
+                 &quot;U.hat&quot; = U,
+                 &quot;tau.hat&quot; = tau)
+  
+  class(CATE_U) &lt;- &quot;U_learner&quot;
+  
+  return(CATE_U)
+}</code></pre>
+<hr />
+</div>
+<div id="r-learner" class="section level2">
+<h2>R-Learner</h2>
+<p>The R-learner <span class="citation">(<a href="#ref-nie2021quasi" role="doc-biblioref">Nie and Wager 2021</a>)</span> (from Residualized) takes its name from regressing residuals of the outcome on the residuals of the treatment. Differently from the U-learner, the R-learner does this via a loss-function approach. Given the above formulation in the U-learner we get that</p>
+<p><span class="math display">\[ u_i = Y_i - \mu(x_i) - [W_i - e(x_i)]\tau(x_i) \]</span></p>
+<p>the ordinary least squares objective function is</p>
+<p><span class="math display">\[L(\tau(.)) =  \frac{1}{n}\sum_{i=1}^n\hat{u}_i^2 = \frac{1}{n}\sum_{i=1}^n\left[ Y_i - \hat{m}(x_i) - [W_i - \hat{e}(x_i)]\tau(x_i)  \right]^2 \]</span></p>
+<p>With some algebra we get</p>
+<p><span class="math display">\[L(\tau(.)) =  \frac{1}{n}\sum_{i=1}^n\left\{\left[ \frac{Y_i - \hat{m}(x_i)}{W_i - \hat{e}(x_i)} - \tau(x_i)  \right]^2\times[W_i - \hat{e}(x_i)]^2\right\} \]</span></p>
+<p>To overcome over-fitting, the R-loss function uses a cross-validation procedure to estimate the parameters <span class="math inline">\(m\)</span> and <span class="math inline">\(e\)</span>, i.e.</p>
+<p><span class="math display">\[L(\tau(.)) =  \frac{1}{n}\sum_{i=1}^n\left\{\left[ \frac{Y_i - \hat{m}^{-q(i)}(x_i)}{W_i - \hat{e}^{-q(i)}(x_i)} - \tau(x_i)  \right]^2\times[W_i - \hat{e}^{-q(i)}(x_i)]^2\right\} \]</span></p>
+<p>where <span class="math inline">\(^{-q(i)}\)</span> represents the <span class="math inline">\(q\in Q\)</span> fold that <span class="math inline">\(i\)</span> was predicted in.
+Now add a complexity regularization term (<span class="math inline">\(\Lambda\)</span>), to the target equation of <span class="math inline">\(\tau\)</span>, and we end up with the equation in <span class="citation">(<a href="#ref-nie2021quasi" role="doc-biblioref">Nie and Wager 2021</a>)</span>:</p>
+<p><span class="math display">\[\hat{\tau} = \arg\min [L(\tau) + \Lambda(\tau)] \]</span></p>
+<p>That is, differently from the U-learner above, the R-learner</p>
+<ol style="list-style-type: decimal">
+<li>Is equivalent to predicting the psuedo outcome <span class="math inline">\(U(x_i)=\frac{Y_i - \hat{m}(x_i)}{W_i - \hat{e}(x_i)}\)</span>, but with each observation weighted with <span class="math inline">\([W_i-\hat{e}(x_i)]^2\)</span>.</li>
+<li>Corrects the <span class="math inline">\(\mu\)</span> and <span class="math inline">\(e\)</span> fitting procedures for over-fitting.</li>
+<li>Adds regularization for complexity.</li>
+</ol>
+<pre class="text"><code>R-Learner: Y,W,X
+1. Fit (Y ~ X) and predict \hat{\mu}(X) using cross-validation prediction
+2. Fit (W ~ X) and predict \hat{e}(X) using cross-validation prediction
+3. Residualize u_y(X) = Y - \hat{\mu}(X) and u_e(X) = W - \hat{e}(X)
+4. Calculate psuedo-outcome U(X) = u_y(X) / u_e(X)
+5. Calculate weights = [W - \hat{e}(X)]^2
+6. Fit (U ~ X) using weights. Optional: regularize complexity</code></pre>
+<p>A generic function for a R -learner may look like:</p>
+<pre class="r"><code>CATE_R_Learner &lt;- function(Y,W,X,
+                           ML_model = &quot;gbm&quot;,
+                           k_folds = 5, ml_grid = NULL) {
+  
+  test &lt;- data.frame(X)
+  
+  ### fit a model for (Y~X)
+  train.Y &lt;- data.frame(Y = Y, X)
+  
+  # split for cross-validation prediction (indicates which fold observation belongs to)
+  ind &lt;- caret::createFolds(Y, k = k_folds, list=FALSE)
+  
+  # empty vector
+  mu = Y
+  
+  # loop over folds
+  for(i in 1:k_folds) {
+    # save observations outside of fold for training
+    train.Y.fold = train.Y[ind != i,]
+    # save observations in fold for prediction
+    test.Y.fold = test[ind == i,]
+    
+    # fit a model on observations outside of fold
+    model.Y &lt;- caret::train(
+      Y ~ .,
+      data = train.Y.fold,
+      method = ML_model,
+      trControl = caret::trainControl(method = &quot;cv&quot;, number = k_folds),
+      tuneGrid = ml_grid
+    )
+    
+    # predict on observations in fold, and append to vector
+    mu[ind == i] &lt;- c(mu,stats::predict(model.Y, newdata = test.Y.fold))
+  }
+
+  ### fit a model for (W~X)
+  train.W &lt;- data.frame(W = W, X)
+  
+  # split for cross-validation prediction (indicates which fold observation belongs to)
+  ind &lt;- caret::createFolds(Y, k = k_folds, list=FALSE)
+  
+  # empty vector
+  e = W
+  
+  # loop over folds
+  for(i in 1:k_folds) {
+    # save observations outside of fold for training
+    train.W.fold = train.W[ind != i,]
+    # save observations in fold for prediction
+    test.W.fold = test[ind == i,]
+    
+    # fit a model on observations outside of fold
+    model.W &lt;- caret::train(
+      W ~ .,
+      data = train.W.fold,
+      method = ML_model,
+      trControl = caret::trainControl(method = &quot;cv&quot;, number = k_folds),
+      tuneGrid = ml_grid
+    )
+    
+    # predict on observations in fold, and append to vector
+    e[ind == i] &lt;- c(e,stats::predict(model.W, newdata = test.W.fold))
+  }
+  
+  ### residualize, fit psuedo-outcome and calculate weights
+  U = (Y - mu) / (W - e)
+  weights = (W - e)^2
+  train.U &lt;- data.frame(U = U, X, weights = weights)
+  
+  model.U &lt;- caret::train(
+    U ~ . - weights,
+    data = train.U,
+    method = ML_model,
+    trControl = caret::trainControl(method = &quot;cv&quot;, number = k_folds),
+    tuneGrid = ml_grid,
+    weights = weights
+  )
+
+  tau &lt;- stats::predict(model.U, newdata = test)
+  
+  CATE_R &lt;- list(&quot;train.Y&quot; = train.Y,
+                 &quot;train.W&quot; = train.W,
+                 &quot;fit.U&quot; = model.U,
+                 &quot;train.U&quot; = train.U,
+                 &quot;mu.hat&quot; = mu, 
+                 &quot;e.hat&quot; = e, 
+                 &quot;U.hat&quot; = U,
+                 &quot;weights&quot; = weights,
+                 &quot;tau.hat&quot; = tau)
+  
+  class(CATE_R) &lt;- &quot;R_learner&quot;
+  
+  return(CATE_R)
+}</code></pre>
+<p>There is package built for the R-Learner, can find it on Github: <a href="https://github.com/xnie/rlearner">Git R-Learner Repo</a>.</p>
+<hr />
+</div>
+</div>
+<div id="causal-forests" class="section level1">
+<h1>Causal Forests</h1>
+<p>Refer to <span class="citation">(<a href="#ref-athey2019estimating" role="doc-biblioref">Athey and Wager 2019</a>)</span> for an application and to <span class="citation">(<a href="#ref-athey2019generalized" role="doc-biblioref">Athey, Tibshirani, and Wager 2019</a>; <a href="#ref-wager2018estimation" role="doc-biblioref">Wager and Athey 2018</a>)</span> for theory.</p>
+<hr />
+<div id="basic-intro---a-causal-tree" class="section level2">
+<h2>Basic Intro - A Causal Tree</h2>
+<p><strong>Regression tree.</strong> A regression tree partitions the covariate space <span class="math inline">\(X\)</span>, and predicts <span class="math inline">\(\hat{Y}\)</span> using the mean of the outcome <span class="math inline">\(Y\)</span> in each partition. The partition that includes <span class="math inline">\(X=x\)</span> is called the leaf of <span class="math inline">\(x\)</span>, denoted by <span class="math inline">\(L(x)\)</span>. The prediction from a regression tree for observation <span class="math inline">\((y_i,x_i)\)</span> is the mean of the outcome of all observations in the leaf that contain <span class="math inline">\(X=x_i\)</span>, i.e. <span class="math display">\[\hat{Y}(x_i) = \frac{1}{|\{i|x_i\in L(x)\}|}\sum_{i|x_i\in L(x)}y_i\]</span>
+that is, the sum of <span class="math inline">\(Y\)</span> in <span class="math inline">\(L(x)\)</span> divided by the number of observations in <span class="math inline">\(L(x)\)</span>.</p>
+<p><strong>Causal tree.</strong> A casual tree partitions the covariate space <span class="math inline">\(X\)</span>, and predicts <span class="math inline">\(\hat{\tau}\)</span> using the difference in mean outcome between a treated group and non-treated group in each partition. As before, the partition that includes <span class="math inline">\(X=x\)</span> is called the leaf of <span class="math inline">\(x\)</span>, denoted by <span class="math inline">\(L(x)\)</span>. We denote by <span class="math inline">\(W\in\{0,1\}\)</span> the non-treatment and treated groups respectively. The prediction from a casual tree for observation <span class="math inline">\((y_i,x_i,w_i)\)</span> is the mean of <span class="math inline">\(Y\)</span> of all observations in the leaf that contain <span class="math inline">\(X=x_i\)</span> and are treated <span class="math inline">\(w=1\)</span> minus the mean of <span class="math inline">\(Y\)</span> of all observations in the leaf that conatins <span class="math inline">\(X=x_i\)</span> and are not treated <span class="math inline">\(w=0\)</span>.
+<span class="math display">\[\begin{align}
+  \hat{\tau}(x) = &amp;\frac{1}{|\{i|w_i=1,x_i\in L(x)\}|}\sum_{\{i|w_i=1,x_i\in L(x)\}}y_i \nonumber \\ 
+        &amp;-\frac{1}{|\{i|w_i=0,x_i\in L(x)\}|}\sum_{\{i|w_i=0,x_i\in L(x)\}}y_i.
+\end{align}\]</span></p>
+<p>which can be viewed as a sample analog of the ATE in leaf <span class="math inline">\(L(x)\)</span>.</p>
+<hr />
+</div>
+<div id="a-causal-forest" class="section level2">
+<h2>A Causal Forest</h2>
+<p>We define a causal forest by generating an ensemble of <span class="math inline">\(B\)</span> causal trees. Each causal tree <span class="math inline">\(b\in B\)</span> provides an estimate for <span class="math inline">\(\hat{\tau}_b(x)\)</span> using the above equation. For the entire causal forest, we use the average of all trees to estimate the CATE: <span class="math display">\[\hat{\tau} (x) = B^{-1}\sum^B_{b=1}\hat{\tau}_b(x)\]</span></p>
+<hr />
+</div>
+<div id="the-grf-algorithm" class="section level2">
+<h2>The GRF algorithm</h2>
+<p>Currently, using a causal forest to estimate the CATE is implemented via the GRF package in R. Here we implement the algorithm 1 from <span class="citation">(<a href="#ref-athey2019estimating" role="doc-biblioref">Athey and Wager 2019</a>)</span>:</p>
+<pre class="r"><code>CATE_CF_Learner &lt;- function(Y,W,X) {
+
+  test &lt;- data.frame(X)
+  
+  # fit a model for (Y~X)
+  train.Y &lt;- data.frame(Y = Y, X)
+  model.Y &lt;- grf::regression_forest(X, Y)
+  mu &lt;- stats::predict(model.Y, newdata = test)[,1]
+  
+  # fit a model for (W~X)
+  train.W &lt;- data.frame(W = W, X)
+  model.W &lt;- grf::regression_forest(X, W)
+  e &lt;- stats::predict(model.W, newdata = test)[,1]
+  
+  # fit the causal forest
+  train.CF = data.frame(Y=Y,W=W,X)
+  model.CF = grf::causal_forest(X,Y,W,
+                          Y.hat = mu, W.hat = e)
+
+  tau &lt;- stats::predict(model.CF, newdata = test)[,1]
+  
+  CATE_CF &lt;- list(&quot;fit.mu&quot; = model.Y,
+                 &quot;train.Y&quot; = train.Y,
+                 &quot;fit.e&quot; = model.W,
+                 &quot;train.W&quot; = train.W,
+                 &quot;fit.CF&quot; = model.CF,
+                 &quot;train.CF&quot; = train.CF,
+                 &quot;mu.hat&quot; = mu, 
+                 &quot;e.hat&quot; = e, 
+                 &quot;tau.hat&quot; = tau)
+  
+  class(CATE_CF) &lt;- &quot;CF_learner&quot;
+  
+  return(CATE_CF)
+}</code></pre>
+<hr />
+</div>
+</div>
+<div id="references" class="section level1 unnumbered">
+<h1>References</h1>
+<div id="refs" class="references csl-bib-body hanging-indent">
+<div id="ref-athey2019generalized" class="csl-entry">
+Athey, Susan, Julie Tibshirani, and Stefan Wager. 2019. <span>“Generalized Random Forests.”</span> <em>The Annals of Statistics</em> 47 (2): 1148–78.
+</div>
+<div id="ref-athey2019estimating" class="csl-entry">
+Athey, Susan, and Stefan Wager. 2019. <span>“Estimating Treatment Effects with Causal Forests: An Application.”</span> <em>Observational Studies</em> 5 (2): 37–51.
+</div>
+<div id="ref-fan2020estimation" class="csl-entry">
+Fan, Qingliang, Yu-Chin Hsu, Robert P Lieli, and Yichong Zhang. 2020. <span>“Estimation of Conditional Average Treatment Effects with High-Dimensional Data.”</span> <em>Journal of Business &amp; Economic Statistics</em>, 1–15.
+</div>
+<div id="ref-kunzel2019metalearners" class="csl-entry">
+Künzel, Sören R, Jasjeet S Sekhon, Peter J Bickel, and Bin Yu. 2019. <span>“Metalearners for Estimating Heterogeneous Treatment Effects Using Machine Learning.”</span> <em>Proceedings of the National Academy of Sciences</em> 116 (10): 4156–65.
+</div>
+<div id="ref-nie2021quasi" class="csl-entry">
+Nie, Xinkun, and Stefan Wager. 2021. <span>“Quasi-Oracle Estimation of Heterogeneous Treatment Effects.”</span> <em>Biometrika</em> 108 (2): 299–319.
+</div>
+<div id="ref-wager2018estimation" class="csl-entry">
+Wager, Stefan, and Susan Athey. 2018. <span>“Estimation and Inference of Heterogeneous Treatment Effects Using Random Forests.”</span> <em>Journal of the American Statistical Association</em> 113 (523): 1228–42.
+</div>
+</div>
+</div>

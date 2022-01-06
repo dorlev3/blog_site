@@ -9,11 +9,8 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-# Research
-
 ## Works in progress
 
-1. The OLS Decomposition of Income Mobility Ranking Measures. [draft](https://drive.google.com/file/d/1s4ihe5TV-xgaPY4Aivi0uS8pqrijO60c/view?usp=sharing)
+The OLS Decomposition of Income Mobility Ranking Measures. [draft](https://drive.google.com/file/d/1s4ihe5TV-xgaPY4Aivi0uS8pqrijO60c/view?usp=sharing)
 
-2. Top Income Inequality in Israel. Joint with Shai Gilat and Oren Daniali.  [draft](https://drive.google.com/file/d/1UYQcHbEC0A0--mAaayBGbzCeBMUqrmxV/view?usp=sharing)
-
+Top Income Inequality in Israel. Joint with Shai Gilat and Oren Daniali. [draft](https://drive.google.com/file/d/1UYQcHbEC0A0--mAaayBGbzCeBMUqrmxV/view?usp=sharing)

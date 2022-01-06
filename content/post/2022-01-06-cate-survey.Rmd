@@ -1,29 +1,23 @@
 ---
-title: "CATE Examples and Simulations"
-author: "Dor Leventer"
-date: "25/12/2021"
+title: CATE Estimation Methods
+author: Dor Leventer
+date: '2022-01-06'
+tags:
+  - causal inference
+  - machine learning
+  - CATE
 output:
   html_document:
     theme: readable
     toc: yes
     toc_depth: 4
     toc_float: yes
-  pdf_document:
-    extra_dependencies:
-    - amssymb
-    - amsmath
-    - mathtools
-    - pdftools
-bibliography: biblio.bib  
+bibliography: biblio.bib
 ---
 
 ------------------------------------------------------------------------
 
-# Setup
-
-## General Setup
-
-```{r setup, message = F, warning = F, results = 'hide'}
+```{r setup, include = F}
 # markdown code option
 knitr::opts_chunk$set(echo = T)
 # clear enviorment
@@ -42,8 +36,6 @@ lapply(vec.pac, require, character.only = TRUE)
 
 ```
 
-
-***
 
 # Introduction
 
@@ -185,8 +177,11 @@ CATE_T_Learner <- function(Y,W,X,
 }
 ```
 
+***
 
 # More Sophisticated Learners
+
+***
 
 ## DB-Learner
 
@@ -195,7 +190,8 @@ The DB-learner [@fan2020estimation] (Double-Robust) takes its name from its prop
 ```{r DB-learner algo., eval = FALSE, highlight= F}
 DB-Learner: Y,W,X,e
 1. Predict \hat{\mu}^1(X) and \hat{\mu}^0(X) using S- or T-learner
-2. Calculate \hat\{tau}(X) = \hat{\mu}^1(X) + e(x)^(-1)*W*(Y - \hat{\mu}^1(X)) - \hat{\mu}^0(X) - (1-e(x))^(-1)*(1-W)*(Y - \hat{\mu}^0(X))
+2. Calculate \hat\{tau}(X) = \hat{\mu}^1(X) + e(x)^(-1)*W*(Y 
+- \hat{\mu}^1(X)) - \hat{\mu}^0(X) - (1-e(x))^(-1)*(1-W)*(Y - \hat{\mu}^0(X))
 ```
 
 
@@ -231,6 +227,7 @@ CATE_DB_Learner <- function(Y,W,X,e,
 }
 ```
 
+***
 
 ## X-Learner
 
@@ -294,6 +291,8 @@ CATE_X_Learner <- function(Y,W,X,g,
 ***
 
 # Residualizing Learners
+
+***
 
 ## U-Learner
 
@@ -450,7 +449,7 @@ CATE_R_Learner <- function(Y,W,X,
   ind <- caret::createFolds(Y, k = k_folds, list=FALSE)
   
   # empty vector
-  mu = c()
+  mu = Y
   
   # loop over folds
   for(i in 1:k_folds) {
@@ -469,7 +468,7 @@ CATE_R_Learner <- function(Y,W,X,
     )
     
     # predict on observations in fold, and append to vector
-    mu <- c(mu,stats::predict(model.Y, newdata = test.Y.fold))
+    mu[ind == i] <- c(mu,stats::predict(model.Y, newdata = test.Y.fold))
   }
 
   ### fit a model for (W~X)
@@ -479,7 +478,7 @@ CATE_R_Learner <- function(Y,W,X,
   ind <- caret::createFolds(Y, k = k_folds, list=FALSE)
   
   # empty vector
-  e = c()
+  e = W
   
   # loop over folds
   for(i in 1:k_folds) {
@@ -498,7 +497,7 @@ CATE_R_Learner <- function(Y,W,X,
     )
     
     # predict on observations in fold, and append to vector
-    e <- c(e,stats::predict(model.W, newdata = test.W.fold))
+    e[ind == i] <- c(e,stats::predict(model.W, newdata = test.W.fold))
   }
   
   ### residualize, fit psuedo-outcome and calculate weights
@@ -542,6 +541,8 @@ There is package built for the R-Learner, can find it on Github: [Git R-Learner 
 
 Refer to [@athey2019estimating] for an application and to [@athey2019generalized;@wager2018estimation] for theory.
 
+***
+
 ## Basic Intro - A Causal Tree
 
 **Regression tree.** A regression tree partitions the covariate space $X$, and predicts $\hat{Y}$ using the mean of the outcome $Y$ in each partition. The partition that includes $X=x$ is called the leaf of $x$, denoted by $L(x)$. The prediction from a regression tree for observation $(y_i,x_i)$ is the mean of the outcome of all observations in the leaf that contain $X=x_i$, i.e. $$\hat{Y}(x_i) = \frac{1}{|\{i|x_i\in L(x)\}|}\sum_{i|x_i\in L(x)}y_i$$
@@ -556,9 +557,13 @@ that is, the sum of $Y$ in $L(x)$ divided by the number of observations in $L(x)
 
 which can be viewed as a sample analog of the ATE in leaf $L(x)$.
 
+***
+
 ## A Causal Forest
 
 We define a causal forest by generating an ensemble of $B$ causal trees. Each causal tree $b\in B$ provides an estimate for $\hat{\tau}_b(x)$ using the above equation. For the entire causal forest, we use the average of all trees to estimate the CATE: $$\hat{\tau} (x) = B^{-1}\sum^B_{b=1}\hat{\tau}_b(x)$$
+
+***
 
 ## The GRF algorithm
 
@@ -603,191 +608,5 @@ CATE_CF_Learner <- function(Y,W,X) {
 ```
 
 ***
-
-# Comparisions
-
-***
-
-## Simulation DGP
-
-Here we provide a function for simulated a data table with $p$ covariates and $N$ observations. 
-
-```{r dgp1}
-# using package simstudy
-sim_data1 <- function(N = 1000, p=3,
-                     means_X = rep(0, times= 3),
-                     sd_X = rep(0.1, times= 3),
-                     rho = 0.3,
-                     a1 = .1, a0 = .1,
-                     b1 = .1, b0 = .1,
-                     mean_e = 0, sd_e = .1) {
-  dt <- simstudy::genCorData(N, mu = means_X, sigma = sd_X, rho = rho, corstr = "cs")
-
-  # generate treatment
-  dt <- simstudy::trtAssign(dt, n = 2, balanced = TRUE, grpName = "W")
-  
-  # generate outcome
-  dt <- dt %>% 
-    mutate(
-      mu0 = a0*V1 - b0*V2,
-      tau = a1*W*(V1 > 0) - b1*W*(V2 > 0),
-      mu1 = mu0 + tau,
-      Y = W*mu0 + (1-W)*mu1 + rnorm(N, mean = mean_e, sd = sd_e)
-    )
-  
-  return(list(
-    x = select(dt, contains("V")),
-    w = dt$W, y = dt$Y,
-    p = rep(0.5, times = N),
-    mu0 = dt$mu0, mu1 = dt$mu1, tau = dt$tau)
-  )
-}
-```
-
-From R-Learner package in Github
-
-```{r dgp2}
-sim_data2 = function(n = 1000) {
-  x = stats::model.matrix(~.-1, data.frame("x1" = rnorm(n), "x2"= rnorm(n), "x3" = rnorm(n), "x4" = rnorm(n), "x5" = rnorm(n), "x6" = rnorm(n)))
-	p = 0.5
-	w = as.numeric(rbinom(n,1,p)==1)
-  m = pmax(0, x[,1] + x[,2], x[,3]) + pmax(0, x[,4] + x[,5])
-  tau = x[,1] + log(1 + exp(x[,2]))
-	mu1 = m + tau/2
-	mu0 = m - tau/2
-	y = w*mu1 + (1-w) * mu0 + 0.5*rnorm(n)
-	list(x=x, w=w, y=y, p=p, m=m, mu0=mu0, mu1=mu1, tau=tau)
-}
-```
-
-***
-
-## Compare CATE Estimates
-
-For each learner we showed above, we will test how the estimated $\hat{\tau}$ is different from the true $\tau$. Hence the error is not in predicting the outcome, but in the causal effect. That is, we define the causal error to be $\hat{e}(x) = \tau(x) - \hat{\tau}(x)$, and calculate per simulation the root of the mean of the square of the causal error, that is $$RMSCE = \sqrt{\frac{1}{N}\sum_{i=1}^N(\hat{e}(x_i))^2}$$ This statisitic cannot be known outside of simulations, due to $\tau$ being unknown. But inside simulations, we set $\tau=...$, and so can calculate the accuracy of each method. 
-
-```{r compare single simulation, results = 'hide'}
-N = 1000
-dt <- sim_data1(N)
-Y = dt$y; W = dt$w; X = dt$x
-e = rep(0.5, times = N)
-
-rmsce <- function(tau, tau.hat) {
-  rmsce = sqrt(mean((tau - tau.hat)^2))
-  return(rmsce)
-}
-rmsce_S <- rmsce(dt$tau, CATE_S_Learner(Y=Y, W=W, X=X)$tau.hat)
-rmsce_T <- rmsce(dt$tau, CATE_T_Learner(Y=Y, W=W, X=X)$tau.hat)
-rmsce_DB <- rmsce(dt$tau, CATE_DB_Learner(Y=Y, W=W, X=X, e=e)$tau.hat)
-rmsce_X <- rmsce(dt$tau, CATE_X_Learner(Y=Y, W=W, X=X, g=e)$tau.hat)
-rmsce_U <- rmsce(dt$tau, CATE_U_Learner(Y=Y, W=W, X=X)$tau.hat)
-rmsce_R <- rmsce(dt$tau, CATE_R_Learner(Y=Y, W=W, X=X)$tau.hat)
-rmsce_CF <- rmsce(dt$tau, CATE_CF_Learner(Y=Y, W=W, X=X)$tau.hat)
-```
-
-Lets review the results:
-
-```{r review single comparasion}
-tribble(
-  ~learner, ~rmsce,
-  "S", rmsce_S,
-  "T", rmsce_T,
-  "DB", rmsce_DB,
-  "X", rmsce_X,
-  "U", rmsce_U,
-  "R", rmsce_R,
-  "CF", rmsce_CF
-)
-```
-
-Now lets see the mean of 20 such simulations
-
-```{r compare multiple simulation first dgp, results = 'hide'}
-num_sims = 20
-N = 500
-dgp = sim_data1
-full = NULL
-
-for(i in 1:num_sims) {
-  N = 500
-  dt <- dgp(N)
-  Y = dt$y; W = dt$w; X = dt$x
-  e = rep(0.5, times = N)
-  
-  rmsce <- function(tau, tau.hat) {
-    rmsce = sqrt(mean((tau - tau.hat)^2))
-    return(rmsce)
-  }
-  rmsce_S <- rmsce(dt$tau, CATE_S_Learner(Y=Y, W=W, X=X)$tau.hat)
-  rmsce_T <- rmsce(dt$tau, CATE_T_Learner(Y=Y, W=W, X=X)$tau.hat)
-  rmsce_DB <- rmsce(dt$tau, CATE_DB_Learner(Y=Y, W=W, X=X, e=e)$tau.hat)
-  rmsce_X <- rmsce(dt$tau, CATE_X_Learner(Y=Y, W=W, X=X, g=e)$tau.hat)
-  rmsce_U <- rmsce(dt$tau, CATE_U_Learner(Y=Y, W=W, X=X)$tau.hat)
-  rmsce_R <- rmsce(dt$tau, CATE_R_Learner(Y=Y, W=W, X=X)$tau.hat)
-  rmsce_R_package <- rmsce(dt$tau, predict(object = rlearner::rboost(y=Y, w=W, x=as.matrix(X))))
-  rmsce_CF <- rmsce(dt$tau, CATE_CF_Learner(Y=Y, W=W, X=X)$tau.hat)
-  learners = c("S","T","DB","X","U","R","CF")
-  rmsce = c(rmsce_S, rmsce_T, rmsce_DB, rmsce_X, rmsce_U, rmsce_R, rmsce_CF)
-  
-  temp = data.frame(learner = learners, rmsce, simulation = i)
-  
-  full = rbind(full, temp)
-}
-```
-
-Lets review the results:
-
-```{r print comparision 1}
-full %>% group_by(learner) %>% 
-  summarise(mean_rmsce = mean(rmsce),
-            median_rmsce = median(rmsce),
-            num_sims = max(simulation))
-```
-
-
-Now lets see the mean of 20 such simulations, for a little more complicated DGP
-
-
-```{r compare multiple simulation second dgp, results = 'hide'}
-num_sims = 20
-N = 500
-dgp = sim_data2
-full = NULL
-
-for(i in 1:num_sims) {
-  
-  dt <- dgp(N)
-  Y = dt$y; W = dt$w; X = dt$x
-  e = rep(0.5, times = N)
-  
-  rmsce <- function(tau, tau.hat) {
-    rmsce = sqrt(mean((tau - tau.hat)^2))
-    return(rmsce)
-  }
-  rmsce_S <- rmsce(dt$tau, CATE_S_Learner(Y=Y, W=W, X=X)$tau.hat)
-  rmsce_T <- rmsce(dt$tau, CATE_T_Learner(Y=Y, W=W, X=X)$tau.hat)
-  rmsce_DB <- rmsce(dt$tau, CATE_DB_Learner(Y=Y, W=W, X=X, e=e)$tau.hat)
-  rmsce_X <- rmsce(dt$tau, CATE_X_Learner(Y=Y, W=W, X=X, g=e)$tau.hat)
-  rmsce_U <- rmsce(dt$tau, CATE_U_Learner(Y=Y, W=W, X=X)$tau.hat)
-  rmsce_R <- rmsce(dt$tau, CATE_R_Learner(Y=Y, W=W, X=X)$tau.hat)
-  rmsce_CF <- rmsce(dt$tau, CATE_CF_Learner(Y=Y, W=W, X=X)$tau.hat)
-  learners = c("S","T","DB","X","U","R","CF")
-  rmsce = c(rmsce_S, rmsce_T, rmsce_DB, rmsce_X, rmsce_U, rmsce_R, rmsce_CF)
-  
-  temp = data.frame(learner = learners, rmsce, simulation = i)
-  
-  full = rbind(full, temp)
-}
-```
-
-
-Lets review the results:
-
-```{r print comparision 2}
-full %>% group_by(learner) %>% 
-  summarise(mean_rmsce = mean(rmsce),
-            median_rmsce = median(rmsce),
-            num_sims = max(simulation))
-```
 
 # References
